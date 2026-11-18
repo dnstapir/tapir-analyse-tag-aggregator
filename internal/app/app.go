@@ -2,22 +2,31 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"math"
+	"slices"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dnstapir/tapir-analyse-lib/common"
+	"github.com/dnstapir/tapir-analyse-lib/libtapir"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 const c_N_HANDLERS = 3
 const c_NATS_DELIM = common.NATS_DELIM
 
 type Conf struct {
-	Debug      bool `toml:"debug"`
-	Interval   int  `toml:"interval"`
-	AnalystID  string
-	Log        common.Logger
-	NatsHandle nats
+	Debug       bool     `toml:"debug"`
+	Interval    int      `toml:"interval"`
+	Tags        []string `toml:"tags"`
+	Observation string   `toml:"observation"`
+	AllowCustom bool     `toml:"allow_custom"`
+	AnalystID   string
+	Log         common.Logger
+	NatsHandle  nats
 }
 
 type appHandle struct {
@@ -27,7 +36,12 @@ type appHandle struct {
 	natsHandle  nats
 	ticker      *time.Ticker
 	exitCh      chan<- common.Exit
+	tags        []string
 	pm
+
+	kvMu     sync.RWMutex
+	kvState  map[string][]byte
+	kvSynced atomic.Bool
 }
 
 type pm struct {
@@ -43,6 +57,34 @@ type nats interface {
 	ActivateSubscription(context.Context) (<-chan common.NatsMsg, error)
 	SetObservation(context.Context, string, string) error
 	Shutdown() error
+	WatchTags(context.Context, []string) (<-chan jetstream.KeyValueEntry, error)
+	ListTagKeys(context.Context, string) ([]string, error)
+	TagKey(string, string) string
+	ParseTagKey(string) (string, bool)
+}
+
+func validateTags(tags []string, allowCustom bool) ([]string, error) {
+	wellDefined := common.TagNames()
+	clean := make([]string, 0, len(tags))
+	var custom []string
+
+	for _, t := range tags {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if !slices.Contains(wellDefined, t) {
+			custom = append(custom, t)
+		}
+		clean = append(clean, t)
+	}
+
+	if len(custom) > 0 && !allowCustom {
+		return nil, fmt.Errorf("custom tags %v not allowed (allow_custom is false): %w",
+			custom, common.ErrBadParam)
+	}
+
+	return clean, nil
 }
 
 func Create(conf Conf) (*appHandle, error) {
@@ -72,6 +114,15 @@ func Create(conf Conf) (*appHandle, error) {
 		a.log.Warning("No interval set. Won't refresh list.")
 	}
 
+	tags, err := validateTags(conf.Tags, conf.AllowCustom)
+	if err != nil {
+		a.log.Error("Invalid tag configuration: %s", err)
+		return nil, err
+	}
+	a.tags = tags
+	a.observation = conf.Observation
+	a.kvState = make(map[string][]byte)
+
 	a.log.Debug("Main app debug logging enabled")
 	return a, nil
 }
@@ -91,6 +142,13 @@ func (a *appHandle) Run(ctx context.Context, exitCh chan<- common.Exit) {
 		return
 	}
 
+	kvChan, err := a.natsHandle.WatchTags(ctx, a.tags)
+	if err != nil {
+		a.log.Error("Couldn't activate tag watcher: '%s'", err)
+		a.exitCh <- common.Exit{ID: a.id, Err: err}
+		return
+	}
+
 	var wg sync.WaitGroup
 	for range c_N_HANDLERS {
 		wg.Go(func() {
@@ -100,6 +158,11 @@ func (a *appHandle) Run(ctx context.Context, exitCh chan<- common.Exit) {
 			a.log.Info("Worker done!")
 		})
 	}
+
+	wg.Go(func() {
+		a.watchLoop(ctx, kvChan)
+		a.log.Info("KV watcher loop done!")
+	})
 
 MAIN_APP_LOOP:
 	for {
@@ -176,4 +239,62 @@ func (a *appHandle) handleMsg(ctx context.Context, msg common.NatsMsg) {
 	}
 
 	panic("not impl")
+}
+
+func (a *appHandle) watchLoop(ctx context.Context, kvChan <-chan jetstream.KeyValueEntry) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case entry, ok := <-kvChan:
+			if !ok {
+				a.log.Warning("KV watcher channel closed")
+				return
+			}
+			if entry == nil {
+				// Initial replay finished; state is now consistent with the bucket
+				a.kvSynced.Store(true)
+				a.log.Info("KV initial sync done, %d keys loaded")
+				continue
+			}
+			a.handleKV(ctx, entry)
+		}
+	}
+}
+
+func (a *appHandle) handleKV(ctx context.Context, e jetstream.KeyValueEntry) {
+	a.log.Debug("KV %s key=%s rev=%d", e.Operation(), e.Key(), e.Revision())
+
+	if len(a.tags) == 0 {
+		a.log.Warning("No tags configured, nothing to match")
+		return
+	}
+
+	domain, ok := a.natsHandle.ParseTagKey(e.Key())
+	if !ok {
+		a.log.Warning("Could not extract domain from tag key '%s'", e.Key())
+		return
+	}
+
+	parts := []string{"*", "*", libtapir.FlipDomainName(domain)}
+	filter := common.NormalizeNatsSubject(strings.Join(parts, common.NATS_DELIM))
+
+	lctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	tagKeys, err := a.natsHandle.ListTagKeys(lctx, filter)
+	if err != nil {
+		a.log.Error("Could not list tag keys for '%s': %s", domain, err)
+		return
+	}
+
+	for _, t := range a.tags {
+		if !slices.Contains(tagKeys, a.natsHandle.TagKey(t, domain)) {
+			return // tag(s) missing, not setting observation
+		}
+	}
+
+	// err = a.natsHandle.SetObservation(ctx, domain, a.observation)
+	// TODO: How to translate a.observation to common.OBS_DNS_TUNNELING
+	a.log.Debug("Set observation '%s' for '%s'", a.observation, domain)
 }

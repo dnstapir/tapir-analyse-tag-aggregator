@@ -1,6 +1,9 @@
 # Ignore built binaries
 bin/
 
+# Don't commit build artifacts
+out/
+
 # Ignore coverage reports
 coverage.out
 
