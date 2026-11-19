@@ -4,7 +4,8 @@ go 1.27.0
 
 require (
 	github.com/dnstapir/tapir-analyse-lib v0.0.0-20260414104340-0e06dc6a4691
-	github.com/pelletier/go-toml/v2 v2.2.4
+	github.com/nats-io/nats.go v1.50.0
+	github.com/pelletier/go-toml/v2 v2.4.3
 )
 
 require (
@@ -12,7 +13,6 @@ require (
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/klauspost/compress v1.18.5 // indirect
 	github.com/miekg/dns v1.1.72 // indirect
-	github.com/nats-io/nats.go v1.50.0 // indirect
 	github.com/nats-io/nkeys v0.4.15 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
 	golang.org/x/crypto v0.50.0 // indirect
