@@ -24,6 +24,7 @@ type Conf struct {
 	Tags        []string `toml:"tags"`
 	Observation string   `toml:"observation"`
 	AllowCustom bool     `toml:"allow_custom"`
+	DryRun      bool     `toml:"dry_run"`
 	AnalystID   string
 	Log         common.Logger
 	NatsHandle  nats
@@ -37,6 +38,7 @@ type appHandle struct {
 	ticker      *time.Ticker
 	exitCh      chan<- common.Exit
 	tags        []string
+	dryRun      bool
 	pm
 
 	kvMu     sync.RWMutex
@@ -120,7 +122,14 @@ func Create(conf Conf) (*appHandle, error) {
 		return nil, err
 	}
 	a.tags = tags
+
+	if _, ok := common.OBS_MAP[conf.Observation]; !ok {
+		a.log.Error("Unknown observation in config: '%s'", conf.Observation)
+		return nil, common.ErrBadParam
+	}
 	a.observation = conf.Observation
+
+	a.dryRun = conf.DryRun
 	a.kvState = make(map[string][]byte)
 
 	a.log.Debug("Main app debug logging enabled")
@@ -216,8 +225,6 @@ MAIN_APP_LOOP:
 func (a *appHandle) handleJob(ctx context.Context, j job) {
 	if j.isTick {
 		a.handleTick(ctx, j.tickData)
-	} else {
-		a.handleMsg(ctx, j.msg)
 	}
 }
 
@@ -228,17 +235,7 @@ func (a *appHandle) handleTick(ctx context.Context, epoch int64) {
 		return
 	}
 
-	panic("not impl")
-}
-
-func (a *appHandle) handleMsg(ctx context.Context, msg common.NatsMsg) {
-	a.log.Debug("Handling %d byte message on subject %s", len(msg.Data), msg.Subject)
-	if len(msg.Data) <= 0 {
-		a.log.Warning("Msg had no data, probably garbage. Won't handle...")
-		return
-	}
-
-	panic("not impl")
+	//panic("not impl")
 }
 
 func (a *appHandle) watchLoop(ctx context.Context, kvChan <-chan jetstream.KeyValueEntry) {
@@ -254,7 +251,7 @@ func (a *appHandle) watchLoop(ctx context.Context, kvChan <-chan jetstream.KeyVa
 			if entry == nil {
 				// Initial replay finished; state is now consistent with the bucket
 				a.kvSynced.Store(true)
-				a.log.Info("KV initial sync done, %d keys loaded")
+				a.log.Info("KV initial sync done")
 				continue
 			}
 			a.handleKV(ctx, entry)
@@ -294,7 +291,15 @@ func (a *appHandle) handleKV(ctx context.Context, e jetstream.KeyValueEntry) {
 		}
 	}
 
-	// err = a.natsHandle.SetObservation(ctx, domain, a.observation)
-	// TODO: How to translate a.observation to common.OBS_DNS_TUNNELING
+	if a.dryRun {
+		a.log.Info("DRY RUN: would set observation '%s' for '%s'", a.observation, domain)
+		return
+	}
+
+	if err := a.natsHandle.SetObservation(ctx, domain, a.observation); err != nil {
+		a.log.Error("Could not set observation '%s' for '%s': %s", a.observation, domain, err)
+		return
+	}
 	a.log.Debug("Set observation '%s' for '%s'", a.observation, domain)
+
 }
