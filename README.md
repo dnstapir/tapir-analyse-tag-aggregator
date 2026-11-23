@@ -1,55 +1,28 @@
-# Configuration example
+# Configuration example 
+This in an example config for a `dns_tunnel` aggregator
 ```toml
-# Debugging for entire app, CLI flag "-debug" has the same effect
 debug = true
+tags = ["tag1", "tag2"]     # which tags to watch
+observation = "dns_tunnel"  # must exist in lib/common/observations.go
+allow_custom = true         # explicit flag for watching tags that are not well-defined
+#dry_run = true             # explicit flag for skipping to set observations
 
-# Interval at which periodic tasks can be executed, if needed
-interval = 120
-
-# NATS configuration
 [nats]
-# Debugging NATS parts only
 debug = true
+url = "nats://nats:4222"
+event_subject = "core-integration-test.events.new_qname"
+observation_subject_prefix = "core-integration-test.observations"
+tag_subject_prefix = "core-integration-test.tags"
 
-# URL where NATS server can be found, can also be set via env "DNSTAPIR_NATS_URL"
-url = "nats://localhost:4222"
-
-# Subject for listening to incoming events that typically drive the analyst
-event_subject = "internal.events.new_qname"
-
-# Subject prefix used when when setting observation flags for a domain
-observation_subject_prefix = "internal.observations"
-
-# Configuration for observation buckets
-[[nats.observation_buckets]]
-# What is the name of the NATS bucket that will contain the observations?
-name = "<BUCKET NAME>"
-
-# What is the observation we are trying to set?
-observation = "<OBSERVATION NAME>"
-
-# Time-to-live for the observations in this bucket
+[[nats.observation_buckets]]    # bucket to set observation in
+observation = "dns_tunnel"
+name = "dns_tunnel_bucket"
+create = false
 ttl = 10
 
-# Should this analyst create the bucket? Observation buckets are typically pre-provisioned
-create = false
+[nats.tag_bucket]               # bucket to read tags from
+name = "tag_bucket"
 
-# Configuration for this analysts private bucket that it can use for arbitrary data
-[nats.private_bucket]
-# Bucket name, ensure it's unique if there are multiple instances of this analyst
-name = "private_tapir-analyse-tag-aggregator"
-
-# Should this analyst create the bucket? Typically yes for private buckets
-create = true
-
-# Configuration for the "seen domains" bucket which keeps track of seen domains
-# Keys in this bucket do not expire
-# Should only be used by a dedicated analyst such as github.com/dnstapir/tapir-analyse-new-qname
-[nats.seen_domains_bucket]
-# Bucket name
-name = "seen_domains"
-
-# Should this analyst create the bucket? Most of the time, the answer is no
-create = false
-
+[api]
+active = false
 ```
